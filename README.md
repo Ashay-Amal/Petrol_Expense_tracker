@@ -20,5 +20,6 @@ npm test
 ## Notes
 
 - Data is stored on the device with `expo-sqlite`.
-- The first fill-up is treated as the odometer baseline, so mileage starts from the second fill-up.
+- Backup and restore use local CSV files that can be shared to another phone without cloud sync.
+- Odometer readings are optional. Mileage appears when at least two odometer readings are available.
 - Default units are INR, kilometers, and liters.

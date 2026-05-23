@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "backgroundColor": "#F6F7FB",
+    "icon": "./assets/icon.png",
     "scheme": "petroltracker",
     "platforms": [
       "android",
@@ -23,15 +24,23 @@
       ]
     ],
     "splash": {
+      "image": "./assets/logo.png",
       "backgroundColor": "#F6F7FB",
       "resizeMode": "contain"
     },
     "android": {
       "package": "com.startapp.petrolexpensetracker",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#F6F7FB"
+      },
       "permissions": []
     },
     "ios": {
       "bundleIdentifier": "com.startapp.petrolexpensetracker"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
     },
     "extra": {
       "eas": {

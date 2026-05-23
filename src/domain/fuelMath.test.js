@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { fillUpsToCsv, parseFillUpsCsv } from "./fillUpCsv.js";
 import {
   calculateStats,
   buildMonthlyExpenseTrend,
@@ -75,6 +76,37 @@ test("review scenario calculates 300 km and 12 km/L", () => {
   assert.equal(enriched[1].mileageKmPerLiter, 12);
 });
 
+test("odometer is optional and mileage waits for the next available reading", () => {
+  const enriched = enrichFillUps([
+    {
+      id: 1,
+      date: "2026-05-01",
+      odometerKm: 1000,
+      liters: 20,
+      totalCostInr: 2000
+    },
+    {
+      id: 2,
+      date: "2026-05-05",
+      odometerKm: null,
+      liters: 10,
+      totalCostInr: 1000
+    },
+    {
+      id: 3,
+      date: "2026-05-10",
+      odometerKm: 1300,
+      liters: 25,
+      totalCostInr: 2500
+    }
+  ]);
+
+  assert.equal(enriched[1].mileageKmPerLiter, null);
+  assert.equal(enriched[2].distanceSinceLastFill, 300);
+  assert.equal(enriched[2].fuelUsedForMileage, 35);
+  assert.equal(enriched[2].mileageKmPerLiter, 8.57);
+});
+
 test("stats summarize spend, fuel, latest mileage, and average valid mileage", () => {
   const stats = calculateStats(baseline);
 
@@ -96,6 +128,18 @@ test("validation rejects duplicate odometer readings", () => {
 
   assert.equal(result.isValid, false);
   assert.match(result.errors.odometerKm, /already uses/);
+});
+
+test("validation accepts blank odometer readings", () => {
+  const result = validateFillUpInput(baseline, {
+    date: "2026-05-22",
+    odometerKm: "",
+    liters: 20,
+    totalCostInr: 2100
+  });
+
+  assert.equal(result.isValid, true);
+  assert.equal(result.input.odometerKm, null);
 });
 
 test("validation rejects new entries below the latest odometer reading", () => {
@@ -170,6 +214,40 @@ test("monthly expense trend groups costs by calendar month", () => {
       ["2026-06", 3000]
     ]
   );
+});
+
+test("CSV export and import preserves optional odometer and notes", () => {
+  const csv = fillUpsToCsv([
+    {
+      date: "2026-05-01",
+      odometerKm: 1000,
+      liters: 20,
+      totalCostInr: 2000,
+      notes: "Baseline"
+    },
+    {
+      date: "2026-05-05",
+      odometerKm: null,
+      liters: 10.5,
+      totalCostInr: 1050,
+      notes: "No reading, pump A"
+    }
+  ]);
+  const parsed = parseFillUpsCsv(csv);
+
+  assert.deepEqual(parsed.errors, []);
+  assert.equal(parsed.fillUps.length, 2);
+  assert.equal(parsed.fillUps[0].odometerKm, 1000);
+  assert.equal(parsed.fillUps[1].odometerKm, null);
+  assert.equal(parsed.fillUps[1].notes, "No reading, pump A");
+});
+
+test("CSV import reports invalid numeric fields", () => {
+  const parsed = parseFillUpsCsv("date,odometerKm,liters,totalCostInr,notes\n2026-05-01,,0,-10,bad\n");
+
+  assert.equal(parsed.fillUps.length, 0);
+  assert.ok(parsed.errors.some((error) => error.includes("liters")));
+  assert.ok(parsed.errors.some((error) => error.includes("totalCostInr")));
 });
 
 test("local calendar dates do not roll over through UTC conversion", () => {

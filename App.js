@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -14,9 +15,22 @@ import {
   TextInput,
   View
 } from "react-native";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system";
+import * as Sharing from "expo-sharing";
 import { SQLiteProvider, useSQLiteContext } from "expo-sqlite";
 
-import { createFillUp, deleteFillUp, listFillUps, migrateDbIfNeeded, updateFillUp } from "./src/data/fillUpRepository";
+import {
+  createFillUp,
+  deleteFillUp,
+  getSetting,
+  listFillUps,
+  migrateDbIfNeeded,
+  replaceAllFillUps,
+  setSetting,
+  updateFillUp
+} from "./src/data/fillUpRepository";
+import { fillUpsToCsv, parseFillUpsCsv } from "./src/domain/fillUpCsv";
 import {
   calculateStats,
   enrichFillUps,
@@ -31,8 +45,11 @@ import {
 const TABS = [
   { id: "dashboard", label: "Dashboard" },
   { id: "history", label: "History" },
-  { id: "charts", label: "Charts" }
+  { id: "charts", label: "Charts" },
+  { id: "settings", label: "Settings" }
 ];
+
+const ThemeContext = createContext(null);
 
 export default function App() {
   return (
@@ -40,6 +57,14 @@ export default function App() {
       <PetrolTracker />
     </SQLiteProvider>
   );
+}
+
+function useAppTheme() {
+  const value = useContext(ThemeContext);
+  if (!value) {
+    throw new Error("ThemeContext is not available.");
+  }
+  return value;
 }
 
 function PetrolTracker() {
@@ -50,9 +75,21 @@ function PetrolTracker() {
   const [loadError, setLoadError] = useState("");
   const [isFormVisible, setIsFormVisible] = useState(false);
   const [editingEntry, setEditingEntry] = useState(null);
+  const [themeMode, setThemeModeState] = useState("light");
 
   const enrichedFillUps = useMemo(() => enrichFillUps(fillUps), [fillUps]);
   const stats = useMemo(() => calculateStats(fillUps), [fillUps]);
+  const colors = themePalettes[themeMode] ?? themePalettes.light;
+  const styles = useMemo(() => createThemedStyles(colors), [colors]);
+  const themeContextValue = useMemo(
+    () => ({
+      colors,
+      styles,
+      themeMode,
+      onThemeChange: changeThemeMode
+    }),
+    [colors, styles, themeMode]
+  );
 
   async function refreshFillUps() {
     setIsLoading(true);
@@ -68,9 +105,29 @@ function PetrolTracker() {
     }
   }
 
+  async function loadThemeSetting() {
+    try {
+      const storedTheme = await getSetting(db, "themeMode", "light");
+      setThemeModeState(storedTheme === "dark" ? "dark" : "light");
+    } catch {
+      setThemeModeState("light");
+    }
+  }
+
   useEffect(() => {
     refreshFillUps();
+    loadThemeSetting();
   }, []);
+
+  async function changeThemeMode(nextThemeMode) {
+    const safeMode = nextThemeMode === "dark" ? "dark" : "light";
+    setThemeModeState(safeMode);
+    try {
+      await setSetting(db, "themeMode", safeMode);
+    } catch (error) {
+      Alert.alert("Theme not saved", error instanceof Error ? error.message : "The app could not save this setting.");
+    }
+  }
 
   function openAddForm() {
     setEditingEntry(null);
@@ -94,16 +151,103 @@ function PetrolTracker() {
     await refreshFillUps();
   }
 
+  async function exportCsvBackup() {
+    try {
+      const csv = fillUpsToCsv(fillUps);
+      const directory = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
+
+      if (!directory) {
+        Alert.alert("Export unavailable", "The app could not access local file storage.");
+        return;
+      }
+
+      const fileUri = `${directory}petrol-expense-backup-${getTodayIsoDate()}.csv`;
+      await FileSystem.writeAsStringAsync(fileUri, csv, {
+        encoding: FileSystem.EncodingType.UTF8
+      });
+
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        Alert.alert("Backup created", fileUri);
+        return;
+      }
+
+      await Sharing.shareAsync(fileUri, {
+        mimeType: "text/csv",
+        UTI: "public.comma-separated-values-text",
+        dialogTitle: "Export petrol expense backup"
+      });
+    } catch (error) {
+      Alert.alert("CSV export failed", error instanceof Error ? error.message : "The backup file could not be created.");
+    }
+  }
+
+  async function importCsvBackup() {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ["text/csv", "text/comma-separated-values", "application/csv", "application/vnd.ms-excel", "*/*"],
+        copyToCacheDirectory: true,
+        multiple: false
+      });
+
+      if (result.canceled || !result.assets?.length) {
+        return;
+      }
+
+      const csvText = await FileSystem.readAsStringAsync(result.assets[0].uri, {
+        encoding: FileSystem.EncodingType.UTF8
+      });
+      const parsed = parseFillUpsCsv(csvText);
+
+      if (parsed.errors.length) {
+        Alert.alert("CSV import failed", parsed.errors.slice(0, 6).join("\n"));
+        return;
+      }
+
+      Alert.alert(
+        "Replace local history?",
+        `Import ${parsed.fillUps.length} fill-up entries from this CSV backup? This replaces the current local history on this phone.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Import",
+            style: "destructive",
+            onPress: () => restoreCsvBackup(parsed.fillUps)
+          }
+        ]
+      );
+    } catch (error) {
+      Alert.alert("CSV import failed", error instanceof Error ? error.message : "The selected file could not be imported.");
+    }
+  }
+
+  async function restoreCsvBackup(parsedFillUps) {
+    try {
+      await replaceAllFillUps(db, parsedFillUps);
+      await refreshFillUps();
+      setActiveTab("history");
+      Alert.alert("Import complete", `${parsedFillUps.length} fill-up entries were restored.`);
+    } catch (error) {
+      Alert.alert("CSV import failed", error instanceof Error ? error.message : "The backup could not be restored.");
+    }
+  }
+
+  async function removeEntry(entry) {
+    try {
+      await deleteFillUp(db, entry.id);
+      await refreshFillUps();
+    } catch (error) {
+      Alert.alert("Delete failed", error instanceof Error ? error.message : "This fill-up could not be deleted.");
+    }
+  }
+
   function requestDelete(entry) {
     Alert.alert("Delete fill-up?", "This removes the transaction from local history.", [
       { text: "Cancel", style: "cancel" },
       {
         text: "Delete",
         style: "destructive",
-        onPress: async () => {
-          await deleteFillUp(db, entry.id);
-          await refreshFillUps();
-        }
+        onPress: () => removeEntry(entry)
       }
     ]);
   }
@@ -121,60 +265,86 @@ function PetrolTracker() {
     );
   } else if (activeTab === "charts") {
     content = <ChartsScreen stats={stats} entries={enrichedFillUps} isLoading={isLoading} loadError={loadError} />;
+  } else if (activeTab === "settings") {
+    content = (
+      <SettingsScreen
+        entryCount={fillUps.length}
+        onExportCsv={exportCsvBackup}
+        onImportCsv={importCsvBackup}
+      />
+    );
   } else {
     content = <DashboardScreen stats={stats} entries={enrichedFillUps} isLoading={isLoading} loadError={loadError} />;
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.background} />
-      <View style={styles.appShell}>
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.headerKicker}>Single vehicle</Text>
-            <Text style={styles.title}>Petrol Tracker</Text>
-          </View>
-          <Pressable style={({ pressed }) => [styles.addButton, pressed && styles.pressed]} onPress={openAddForm}>
-            <Text style={styles.addButtonText}>+ Fill-up</Text>
-          </Pressable>
-        </View>
-
-        <View style={styles.tabBar}>
-          {TABS.map((tab) => (
-            <Pressable
-              key={tab.id}
-              style={({ pressed }) => [
-                styles.tabButton,
-                activeTab === tab.id && styles.tabButtonActive,
-                pressed && styles.pressed
-              ]}
-              onPress={() => setActiveTab(tab.id)}
-            >
-              <Text style={[styles.tabText, activeTab === tab.id && styles.tabTextActive]}>{tab.label}</Text>
+    <ThemeContext.Provider value={themeContextValue}>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle={themeMode === "dark" ? "light-content" : "dark-content"} backgroundColor={colors.background} />
+        <View style={styles.appShell}>
+          <View style={styles.header}>
+            <View style={styles.brandGroup}>
+              <Image source={require("./assets/logo.png")} style={styles.logo} />
+              <View style={styles.brandText}>
+                <Text style={styles.headerKicker} numberOfLines={1}>
+                  Single vehicle
+                </Text>
+                <Text style={styles.title} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+                  Petrol Tracker
+                </Text>
+              </View>
+            </View>
+            <Pressable style={({ pressed }) => [styles.addButton, pressed && styles.pressed]} onPress={openAddForm}>
+              <Text style={styles.addButtonText}>+ Fill-up</Text>
             </Pressable>
-          ))}
+          </View>
+
+          <View style={styles.tabBar}>
+            {TABS.map((tab) => (
+              <Pressable
+                key={tab.id}
+                style={({ pressed }) => [
+                  styles.tabButton,
+                  activeTab === tab.id && styles.tabButtonActive,
+                  pressed && styles.pressed
+                ]}
+                onPress={() => setActiveTab(tab.id)}
+              >
+                <Text
+                  style={[styles.tabText, activeTab === tab.id && styles.tabTextActive]}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.75}
+                >
+                  {tab.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+            {content}
+          </ScrollView>
         </View>
 
-        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-          {content}
-        </ScrollView>
-      </View>
-
-      <FillUpForm
-        visible={isFormVisible}
-        entry={editingEntry}
-        entries={fillUps}
-        onCancel={() => {
-          setIsFormVisible(false);
-          setEditingEntry(null);
-        }}
-        onSave={saveEntry}
-      />
-    </SafeAreaView>
+        <FillUpForm
+          visible={isFormVisible}
+          entry={editingEntry}
+          entries={fillUps}
+          onCancel={() => {
+            setIsFormVisible(false);
+            setEditingEntry(null);
+          }}
+          onSave={saveEntry}
+        />
+      </SafeAreaView>
+    </ThemeContext.Provider>
   );
 }
 
 function DashboardScreen({ stats, entries, isLoading, loadError }) {
+  const { colors, styles } = useAppTheme();
+
   if (isLoading) {
     return <LoadingState label="Loading dashboard" />;
   }
@@ -213,19 +383,30 @@ function DashboardScreen({ stats, entries, isLoading, loadError }) {
           <Text style={styles.sectionTitle}>Latest Fill-up</Text>
           <View style={styles.detailGrid}>
             <DetailItem label="Date" value={formatDisplayDate(latestEntry.date)} />
-            <DetailItem label="Odometer" value={`${formatNumber(latestEntry.odometerKm, 1)} km`} />
+            <DetailItem
+              label="Odometer"
+              value={latestEntry.odometerKm === null ? "Not recorded" : `${formatNumber(latestEntry.odometerKm, 1)} km`}
+            />
             <DetailItem label="Fuel" value={`${formatNumber(latestEntry.liters, 2)} L`} />
             <DetailItem label="Cost" value={formatInr(latestEntry.totalCostInr)} />
             <DetailItem
               label="Distance"
               value={
-                latestEntry.distanceSinceLastFill === null ? "Baseline" : `${formatNumber(latestEntry.distanceSinceLastFill, 1)} km`
+                latestEntry.odometerKm === null
+                  ? "Needs reading"
+                  : latestEntry.distanceSinceLastFill === null
+                    ? "Baseline"
+                    : `${formatNumber(latestEntry.distanceSinceLastFill, 1)} km`
               }
             />
             <DetailItem
               label="Mileage"
               value={
-                latestEntry.mileageKmPerLiter === null ? "Starts next fill-up" : `${formatNumber(latestEntry.mileageKmPerLiter, 2)} km/L`
+                latestEntry.odometerKm === null
+                  ? "Needs odometer"
+                  : latestEntry.mileageKmPerLiter === null
+                    ? "Starts next reading"
+                    : `${formatNumber(latestEntry.mileageKmPerLiter, 2)} km/L`
               }
             />
           </View>
@@ -241,6 +422,8 @@ function DashboardScreen({ stats, entries, isLoading, loadError }) {
 }
 
 function HistoryScreen({ entries, isLoading, loadError, onEdit, onDelete }) {
+  const { styles } = useAppTheme();
+
   if (isLoading) {
     return <LoadingState label="Loading history" />;
   }
@@ -265,7 +448,9 @@ function HistoryScreen({ entries, isLoading, loadError, onEdit, onDelete }) {
           <View style={styles.historyTopRow}>
             <View>
               <Text style={styles.historyDate}>{formatDisplayDate(entry.date)}</Text>
-              <Text style={styles.historyMeta}>{formatNumber(entry.odometerKm, 1)} km odometer</Text>
+              <Text style={styles.historyMeta}>
+                {entry.odometerKm === null ? "No odometer reading" : `${formatNumber(entry.odometerKm, 1)} km odometer`}
+              </Text>
             </View>
             <Text style={styles.historyCost}>{formatInr(entry.totalCostInr)}</Text>
           </View>
@@ -275,7 +460,13 @@ function HistoryScreen({ entries, isLoading, loadError, onEdit, onDelete }) {
             <MetricPill label="Price" value={formatInr(entry.pricePerLiter)} />
             <MetricPill
               label="Mileage"
-              value={entry.mileageKmPerLiter === null ? "Baseline" : `${formatNumber(entry.mileageKmPerLiter, 2)} km/L`}
+              value={
+                entry.odometerKm === null
+                  ? "No reading"
+                  : entry.mileageKmPerLiter === null
+                    ? "Baseline"
+                    : `${formatNumber(entry.mileageKmPerLiter, 2)} km/L`
+              }
             />
           </View>
 
@@ -296,6 +487,8 @@ function HistoryScreen({ entries, isLoading, loadError, onEdit, onDelete }) {
 }
 
 function ChartsScreen({ stats, entries, isLoading, loadError }) {
+  const { styles } = useAppTheme();
+
   if (isLoading) {
     return <LoadingState label="Loading charts" />;
   }
@@ -320,6 +513,7 @@ function ChartsScreen({ stats, entries, isLoading, loadError }) {
 }
 
 function MileageTrendChart({ entries }) {
+  const { styles } = useAppTheme();
   const rows = entries.filter((entry) => entry.mileageKmPerLiter !== null);
 
   if (!rows.length) {
@@ -348,6 +542,8 @@ function MileageTrendChart({ entries }) {
 }
 
 function MonthlyExpenseChart({ trend }) {
+  const { styles } = useAppTheme();
+
   if (!trend.length) {
     return <SmallEmptyState message="Monthly expense totals will appear after your first fill-up." />;
   }
@@ -373,7 +569,53 @@ function MonthlyExpenseChart({ trend }) {
   );
 }
 
+function SettingsScreen({ entryCount, onExportCsv, onImportCsv }) {
+  const { styles, themeMode, onThemeChange } = useAppTheme();
+
+  return (
+    <View style={styles.screenStack}>
+      <View style={styles.sectionPanel}>
+        <Text style={styles.sectionTitle}>Theme</Text>
+        <View style={styles.segmentedControl}>
+          {["light", "dark"].map((mode) => (
+            <Pressable
+              key={mode}
+              style={({ pressed }) => [
+                styles.segmentButton,
+                themeMode === mode && styles.segmentButtonActive,
+                pressed && styles.pressed
+              ]}
+              onPress={() => onThemeChange(mode)}
+            >
+              <Text style={[styles.segmentText, themeMode === mode && styles.segmentTextActive]}>
+                {mode === "light" ? "Light" : "Dark"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
+      <View style={styles.sectionPanel}>
+        <Text style={styles.sectionTitle}>Backup</Text>
+        <View style={styles.backupMetaRow}>
+          <DetailItem label="Local entries" value={String(entryCount)} />
+          <DetailItem label="Format" value="CSV spreadsheet" />
+        </View>
+        <View style={styles.backupActions}>
+          <Pressable style={({ pressed }) => [styles.saveButton, pressed && styles.pressed]} onPress={onExportCsv}>
+            <Text style={styles.saveButtonText}>Export CSV</Text>
+          </Pressable>
+          <Pressable style={({ pressed }) => [styles.secondaryButtonLarge, pressed && styles.pressed]} onPress={onImportCsv}>
+            <Text style={styles.secondaryButtonText}>Import CSV</Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function FillUpForm({ visible, entry, entries, onCancel, onSave }) {
+  const { colors, styles } = useAppTheme();
   const [date, setDate] = useState(getTodayIsoDate());
   const [odometerKm, setOdometerKm] = useState("");
   const [liters, setLiters] = useState("");
@@ -385,7 +627,7 @@ function FillUpForm({ visible, entry, entries, onCancel, onSave }) {
   useEffect(() => {
     if (entry) {
       setDate(entry.date);
-      setOdometerKm(String(entry.odometerKm));
+      setOdometerKm(entry.odometerKm === null || entry.odometerKm === undefined ? "" : String(entry.odometerKm));
       setLiters(String(entry.liters));
       setTotalCostInr(String(entry.totalCostInr));
       setNotes(entry.notes ?? "");
@@ -397,6 +639,7 @@ function FillUpForm({ visible, entry, entries, onCancel, onSave }) {
       setNotes("");
     }
     setErrors({});
+    setIsSaving(false);
   }, [entry, visible]);
 
   async function submit() {
@@ -450,15 +693,15 @@ function FillUpForm({ visible, entry, entries, onCancel, onSave }) {
               label="Date"
               value={date}
               onChangeText={setDate}
-              placeholder="YYYY-MM-DD"
+              placeholder="Today, editable as YYYY-MM-DD"
               error={errors.date}
               autoCapitalize="none"
             />
             <Field
-              label="Odometer km"
+              label="Odometer km (optional)"
               value={odometerKm}
               onChangeText={setOdometerKm}
-              placeholder="Example: 12500"
+              placeholder="Blank if not recorded"
               keyboardType="decimal-pad"
               error={errors.odometerKm}
             />
@@ -502,6 +745,8 @@ function FillUpForm({ visible, entry, entries, onCancel, onSave }) {
 }
 
 function Field({ label, error, inputStyle, ...inputProps }) {
+  const { colors, styles } = useAppTheme();
+
   return (
     <View style={styles.field}>
       <Text style={styles.fieldLabel}>{label}</Text>
@@ -516,6 +761,8 @@ function Field({ label, error, inputStyle, ...inputProps }) {
 }
 
 function StatTile({ label, value, accentColor }) {
+  const { styles } = useAppTheme();
+
   return (
     <View style={styles.statTile}>
       <View style={[styles.statAccent, { backgroundColor: accentColor }]} />
@@ -528,6 +775,8 @@ function StatTile({ label, value, accentColor }) {
 }
 
 function DetailItem({ label, value }) {
+  const { styles } = useAppTheme();
+
   return (
     <View style={styles.detailItem}>
       <Text style={styles.detailLabel}>{label}</Text>
@@ -537,6 +786,8 @@ function DetailItem({ label, value }) {
 }
 
 function MetricPill({ label, value }) {
+  const { styles } = useAppTheme();
+
   return (
     <View style={styles.metricPill}>
       <Text style={styles.metricLabel}>{label}</Text>
@@ -546,6 +797,8 @@ function MetricPill({ label, value }) {
 }
 
 function LoadingState({ label }) {
+  const { colors, styles } = useAppTheme();
+
   return (
     <View style={styles.statePanel}>
       <ActivityIndicator color={colors.green} />
@@ -555,6 +808,8 @@ function LoadingState({ label }) {
 }
 
 function MessageState({ title, message }) {
+  const { styles } = useAppTheme();
+
   return (
     <View style={styles.statePanel}>
       <Text style={styles.stateTitle}>{title}</Text>
@@ -564,37 +819,73 @@ function MessageState({ title, message }) {
 }
 
 function SmallEmptyState({ message }) {
+  const { styles } = useAppTheme();
+
   return <Text style={styles.smallEmptyText}>{message}</Text>;
 }
 
-const colors = {
-  background: "#F6F7FB",
-  surface: "#FFFFFF",
-  ink: "#18202F",
-  muted: "#697386",
-  line: "#D9DEE8",
-  green: "#138A72",
-  greenDark: "#0D5E50",
-  red: "#C2413A",
-  blue: "#2563EB",
-  orange: "#D97706",
-  purple: "#7C3AED"
+const themePalettes = {
+  light: {
+    background: "#F6F7FB",
+    surface: "#FFFFFF",
+    ink: "#18202F",
+    muted: "#697386",
+    line: "#D9DEE8",
+    green: "#138A72",
+    greenDark: "#0D5E50",
+    red: "#C2413A",
+    blue: "#2563EB",
+    orange: "#D97706",
+    purple: "#7C3AED",
+    tabBackground: "#E9EDF4",
+    subtle: "#F8FAFC",
+    metricBg: "#EDF7F4",
+    metricBorder: "#CFE8E1",
+    dangerBorder: "#F2C5C1",
+    chartTrack: "#E7ECF3",
+    errorBg: "#FDEDEC",
+    errorBorder: "#F5C6C2",
+    shadow: "#1F2937"
+  },
+  dark: {
+    background: "#101418",
+    surface: "#182028",
+    ink: "#F4F7FA",
+    muted: "#A8B3C2",
+    line: "#2C3744",
+    green: "#2DD4BF",
+    greenDark: "#7DD3C7",
+    red: "#F87171",
+    blue: "#60A5FA",
+    orange: "#FBBF24",
+    purple: "#A78BFA",
+    tabBackground: "#111827",
+    subtle: "#202A35",
+    metricBg: "#16312D",
+    metricBorder: "#23554D",
+    dangerBorder: "#7F2F2F",
+    chartTrack: "#26313D",
+    errorBg: "#3B1717",
+    errorBorder: "#7F2F2F",
+    shadow: "#000000"
+  }
 };
 
-const shadows = Platform.select({
-  ios: {
-    shadowColor: "#1F2937",
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 8 }
-  },
-  android: {
-    elevation: 2
-  },
-  default: {}
-});
+function createThemedStyles(colors) {
+  const shadows = Platform.select({
+    ios: {
+      shadowColor: colors.shadow,
+      shadowOpacity: 0.12,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 8 }
+    },
+    android: {
+      elevation: 2
+    },
+    default: {}
+  });
 
-const styles = StyleSheet.create({
+  return StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: colors.background
@@ -610,6 +901,22 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12
   },
+  brandGroup: {
+    alignItems: "center",
+    flexDirection: "row",
+    flex: 1,
+    gap: 10,
+    minWidth: 0
+  },
+  brandText: {
+    flex: 1,
+    minWidth: 0
+  },
+  logo: {
+    borderRadius: 8,
+    height: 44,
+    width: 44
+  },
   headerKicker: {
     color: colors.green,
     fontSize: 12,
@@ -619,7 +926,7 @@ const styles = StyleSheet.create({
   },
   title: {
     color: colors.ink,
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: "900",
     letterSpacing: 0,
     marginTop: 2
@@ -628,6 +935,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: colors.green,
     borderRadius: 8,
+    flexShrink: 0,
     justifyContent: "center",
     minHeight: 44,
     paddingHorizontal: 14
@@ -641,7 +949,7 @@ const styles = StyleSheet.create({
     opacity: 0.72
   },
   tabBar: {
-    backgroundColor: "#E9EDF4",
+    backgroundColor: colors.tabBackground,
     borderRadius: 8,
     flexDirection: "row",
     gap: 4,
@@ -728,7 +1036,7 @@ const styles = StyleSheet.create({
     gap: 10
   },
   detailItem: {
-    backgroundColor: "#F8FAFC",
+    backgroundColor: colors.subtle,
     borderRadius: 8,
     padding: 12,
     width: "48%"
@@ -804,8 +1112,8 @@ const styles = StyleSheet.create({
     marginTop: 14
   },
   metricPill: {
-    backgroundColor: "#EDF7F4",
-    borderColor: "#CFE8E1",
+    backgroundColor: colors.metricBg,
+    borderColor: colors.metricBorder,
     borderRadius: 8,
     borderWidth: 1,
     paddingHorizontal: 10,
@@ -848,9 +1156,18 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "800"
   },
+  secondaryButtonLarge: {
+    alignItems: "center",
+    borderColor: colors.line,
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: "center",
+    minHeight: 52,
+    paddingHorizontal: 14
+  },
   dangerButton: {
     alignItems: "center",
-    borderColor: "#F2C5C1",
+    borderColor: colors.dangerBorder,
     borderRadius: 8,
     borderWidth: 1,
     justifyContent: "center",
@@ -881,7 +1198,7 @@ const styles = StyleSheet.create({
   },
   barTrack: {
     alignItems: "center",
-    backgroundColor: "#E7ECF3",
+    backgroundColor: colors.chartTrack,
     borderRadius: 8,
     height: 150,
     justifyContent: "flex-end",
@@ -911,7 +1228,7 @@ const styles = StyleSheet.create({
     fontWeight: "800"
   },
   expenseTrack: {
-    backgroundColor: "#E7ECF3",
+    backgroundColor: colors.chartTrack,
     borderRadius: 8,
     height: 16,
     overflow: "hidden"
@@ -930,6 +1247,41 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 14,
     lineHeight: 20
+  },
+  segmentedControl: {
+    backgroundColor: colors.tabBackground,
+    borderRadius: 8,
+    flexDirection: "row",
+    gap: 4,
+    padding: 4
+  },
+  segmentButton: {
+    alignItems: "center",
+    borderRadius: 6,
+    flex: 1,
+    justifyContent: "center",
+    minHeight: 44
+  },
+  segmentButtonActive: {
+    backgroundColor: colors.surface,
+    ...shadows
+  },
+  segmentText: {
+    color: colors.muted,
+    fontSize: 14,
+    fontWeight: "800"
+  },
+  segmentTextActive: {
+    color: colors.ink
+  },
+  backupMetaRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10
+  },
+  backupActions: {
+    gap: 10,
+    marginTop: 14
   },
   modalSafeArea: {
     flex: 1,
@@ -958,8 +1310,8 @@ const styles = StyleSheet.create({
     paddingBottom: 32
   },
   formError: {
-    backgroundColor: "#FDEDEC",
-    borderColor: "#F5C6C2",
+    backgroundColor: colors.errorBg,
+    borderColor: colors.errorBorder,
     borderRadius: 8,
     borderWidth: 1,
     color: colors.red,
@@ -1012,4 +1364,5 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "900"
   }
-});
+  });
+}

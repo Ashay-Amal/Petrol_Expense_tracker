@@ -28,10 +28,22 @@ export function parsePositiveNumber(value) {
   return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
+export function parseOptionalPositiveNumber(value) {
+  const normalized = String(value ?? "")
+    .replace(/,/g, "")
+    .trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  return parsePositiveNumber(normalized);
+}
+
 export function normalizeFillUpInput(input) {
   return {
     date: String(input.date ?? "").trim(),
-    odometerKm: parsePositiveNumber(input.odometerKm),
+    odometerKm: parseOptionalPositiveNumber(input.odometerKm),
     liters: parsePositiveNumber(input.liters),
     totalCostInr: parsePositiveNumber(input.totalCostInr),
     notes: String(input.notes ?? "").trim()
@@ -53,14 +65,18 @@ export function compareIsoDates(left, right) {
 
 export function sortFillUps(fillUps) {
   return [...fillUps].sort((left, right) => {
-    const odometerDelta = Number(left.odometerKm) - Number(right.odometerKm);
-    if (odometerDelta !== 0) {
-      return odometerDelta;
-    }
-
     const dateDelta = compareIsoDates(left.date, right.date);
     if (dateDelta !== 0) {
       return dateDelta;
+    }
+
+    const leftOdometer = Number(left.odometerKm);
+    const rightOdometer = Number(right.odometerKm);
+    if (Number.isFinite(leftOdometer) && Number.isFinite(rightOdometer)) {
+      const odometerDelta = leftOdometer - rightOdometer;
+      if (odometerDelta !== 0) {
+        return odometerDelta;
+      }
     }
 
     return String(left.id ?? "").localeCompare(String(right.id ?? ""));
@@ -78,18 +94,35 @@ export function round(value, decimals = 2) {
 
 export function enrichFillUps(fillUps) {
   const sorted = sortFillUps(fillUps);
+  let previousOdometerEntry = null;
+  let litersSincePreviousOdometer = 0;
 
-  return sorted.map((entry, index) => {
-    const previous = sorted[index - 1];
-    const odometerKm = Number(entry.odometerKm);
+  return sorted.map((entry) => {
+    const odometerKm =
+      entry.odometerKm === null || entry.odometerKm === undefined || entry.odometerKm === ""
+        ? null
+        : Number(entry.odometerKm);
     const liters = Number(entry.liters);
     const totalCostInr = Number(entry.totalCostInr);
-    const distanceSinceLastFill =
-      previous && odometerKm > Number(previous.odometerKm)
-        ? round(odometerKm - Number(previous.odometerKm), 2)
-        : null;
-    const mileageKmPerLiter =
-      distanceSinceLastFill !== null && liters > 0 ? round(distanceSinceLastFill / liters, 2) : null;
+    litersSincePreviousOdometer += Number.isFinite(liters) ? liters : 0;
+
+    let distanceSinceLastFill = null;
+    let mileageKmPerLiter = null;
+    let fuelUsedForMileage = null;
+
+    if (odometerKm !== null && Number.isFinite(odometerKm)) {
+      if (previousOdometerEntry && odometerKm > previousOdometerEntry.odometerKm) {
+        distanceSinceLastFill = round(odometerKm - previousOdometerEntry.odometerKm, 2);
+        fuelUsedForMileage = round(litersSincePreviousOdometer, 2);
+        mileageKmPerLiter =
+          fuelUsedForMileage !== null && fuelUsedForMileage > 0
+            ? round(distanceSinceLastFill / fuelUsedForMileage, 2)
+            : null;
+      }
+
+      previousOdometerEntry = { ...entry, odometerKm };
+      litersSincePreviousOdometer = 0;
+    }
 
     return {
       ...entry,
@@ -98,6 +131,7 @@ export function enrichFillUps(fillUps) {
       totalCostInr,
       pricePerLiter: liters > 0 ? round(totalCostInr / liters, 2) : null,
       distanceSinceLastFill,
+      fuelUsedForMileage,
       mileageKmPerLiter
     };
   });
@@ -179,8 +213,8 @@ export function validateFillUpInput(existingFillUps, rawInput, editingId = null)
     errors.date = "Future fill-up dates are not allowed.";
   }
 
-  if (!Number.isFinite(input.odometerKm) || input.odometerKm <= 0) {
-    errors.odometerKm = "Enter an odometer reading greater than 0 km.";
+  if (input.odometerKm !== null && (!Number.isFinite(input.odometerKm) || input.odometerKm <= 0)) {
+    errors.odometerKm = "Enter an odometer reading greater than 0 km, or leave it blank.";
   }
 
   if (!Number.isFinite(input.liters) || input.liters <= 0) {
@@ -196,19 +230,29 @@ export function validateFillUpInput(existingFillUps, rawInput, editingId = null)
   }
 
   const otherFillUps = existingFillUps.filter((entry) => String(entry.id) !== String(editingId));
-  const duplicateOdometer = otherFillUps.find((entry) => Number(entry.odometerKm) === input.odometerKm);
-  if (duplicateOdometer) {
+  const duplicateOdometer = otherFillUps.find(
+    (entry) => input.odometerKm !== null && Number(entry.odometerKm) === input.odometerKm
+  );
+  if (input.odometerKm !== null && duplicateOdometer) {
     errors.odometerKm = `A fill-up already uses ${formatNumber(input.odometerKm)} km.`;
   }
 
-  const sorted = sortFillUps(otherFillUps);
-  const latestReading = sorted[sorted.length - 1];
-  if (!errors.odometerKm && !editingId && latestReading && input.odometerKm <= Number(latestReading.odometerKm)) {
+  const readings = sortFillUps(otherFillUps).filter((entry) => entry.odometerKm !== null && entry.odometerKm !== undefined);
+  const latestReading = readings[readings.length - 1];
+  if (
+    input.odometerKm !== null &&
+    !errors.odometerKm &&
+    !editingId &&
+    latestReading &&
+    input.odometerKm <= Number(latestReading.odometerKm)
+  ) {
     errors.odometerKm = `Enter an odometer reading above the latest ${formatNumber(latestReading.odometerKm)} km entry.`;
   }
 
-  const lowerReading = [...sorted].reverse().find((entry) => Number(entry.odometerKm) < input.odometerKm);
-  const higherReading = sorted.find((entry) => Number(entry.odometerKm) > input.odometerKm);
+  const lowerReading =
+    input.odometerKm === null ? null : [...readings].reverse().find((entry) => Number(entry.odometerKm) < input.odometerKm);
+  const higherReading =
+    input.odometerKm === null ? null : readings.find((entry) => Number(entry.odometerKm) > input.odometerKm);
 
   if (lowerReading && compareIsoDates(input.date, lowerReading.date) < 0) {
     errors.date = `Use ${formatDisplayDate(lowerReading.date)} or later for a reading above ${formatNumber(
