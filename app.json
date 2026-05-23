@@ -5,15 +5,38 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "backgroundColor": "#F6F7FB",
     "scheme": "petroltracker",
-    "platforms": ["android", "ios"],
-    "assetBundlePatterns": ["**/*"],
+    "platforms": [
+      "android",
+      "ios"
+    ],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F6F7FB"
+        }
+      ]
+    ],
+    "splash": {
+      "backgroundColor": "#F6F7FB",
+      "resizeMode": "contain"
+    },
     "android": {
       "package": "com.startapp.petrolexpensetracker",
       "permissions": []
     },
     "ios": {
       "bundleIdentifier": "com.startapp.petrolexpensetracker"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "e307464f-1f9a-4ac2-b530-5f11dbb50bbc"
+      }
     }
   }
 }
