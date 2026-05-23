@@ -104,7 +104,6 @@ export function enrichFillUps(fillUps) {
         : Number(entry.odometerKm);
     const liters = Number(entry.liters);
     const totalCostInr = Number(entry.totalCostInr);
-    litersSincePreviousOdometer += Number.isFinite(liters) ? liters : 0;
 
     let distanceSinceLastFill = null;
     let mileageKmPerLiter = null;
@@ -122,6 +121,10 @@ export function enrichFillUps(fillUps) {
 
       previousOdometerEntry = { ...entry, odometerKm };
       litersSincePreviousOdometer = 0;
+    }
+
+    if (Number.isFinite(liters)) {
+      litersSincePreviousOdometer += liters;
     }
 
     return {

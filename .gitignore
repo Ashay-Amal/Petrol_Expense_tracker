@@ -1,5 +1,6 @@
 node_modules/
 .expo/
+.expo-bundle-check/
 dist/
 web-build/
 npm-debug.log*
