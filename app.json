@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Petrol Expense Tracker",
+    "slug": "petrol-expense-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "petroltracker",
+    "platforms": ["android", "ios"],
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.startapp.petrolexpensetracker",
+      "permissions": []
+    },
+    "ios": {
+      "bundleIdentifier": "com.startapp.petrolexpensetracker"
+    }
+  }
+}

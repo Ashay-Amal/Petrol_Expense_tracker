@@ -1,0 +1,22 @@
+{
+  "name": "petrol-expense-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "test": "node src/domain/fuelMath.test.js"
+  },
+  "dependencies": {
+    "expo": "~51.0.39",
+    "expo-sqlite": "~14.0.6",
+    "react": "18.2.0",
+    "react-native": "0.74.5"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0"
+  }
+}
